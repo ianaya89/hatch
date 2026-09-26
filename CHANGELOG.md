@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-26
+
 ### Added
 
 - Choose what to sync: `→` on an item lists its children with sizes and lets you untick them; `-` adds exclude patterns; `+` adds paths or globs (`~/Documents/**/*.pdf`) resolved on the old machine; `/` filters the list.
@@ -44,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bootstrap: `serve` serves its own binary on the same port (HTTP is detected by peeking the first bytes) and prints a QR + one-liner that verifies the sha256 before running `hatch pull`.
 - Pairing cloud: both peers draw the same spinning 3D braille particle cloud (orb/ring/galaxy/helix, palette, arms, tilt, spin from the session key), rotated by wall-clock time so both screens move in sync; the TUI asks to confirm the match.
 
-[Unreleased]: https://github.com/ianaya89/hatch/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/ianaya89/hatch/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ianaya89/hatch/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/ianaya89/hatch/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/ianaya89/hatch/releases/tag/v0.1.0

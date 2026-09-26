@@ -25,6 +25,16 @@ const (
 	screenError
 )
 
+type mode int
+
+const (
+	modeList mode = iota
+	modeFilter
+	modeAdd
+	modeExclude
+	modeDrill
+)
+
 type group struct {
 	kind     Kind
 	items    []Item
@@ -34,18 +44,35 @@ type group struct {
 
 type row struct{ g, i int }
 
-type connectedMsg struct{ sess *session }
+type connectedMsg struct {
+	sess    *session
+	sel     *savedSelection
+	filters map[string]itemFilter
+	kids    map[string]childrenReply
+}
 type errMsg struct{ err error }
 type tickMsg time.Time
+type addedMsg struct {
+	rep addReply
+	err error
+}
+type kidsMsg struct {
+	id    string
+	rep   childrenReply
+	err   error
+	drill bool
+}
 
 type model struct {
 	screen    screen
+	mode      mode
 	home      string
 	addr      string
 	opts      pullOptions
 	ctx       context.Context
 	cancel    context.CancelFunc
 	input     textinput.Model
+	prompt    textinput.Model
 	inputErr  string
 	spin      spinner.Model
 	bar       progress.Model
@@ -61,6 +88,17 @@ type model struct {
 	lastBytes int64
 	lastTick  time.Time
 	vis       visual
+
+	filter   string
+	filters  map[string]itemFilter
+	kids     map[string]childrenReply
+	custom   []string
+	restored bool
+	busy     bool
+	status   string
+	drillID  string
+	drillCur int
+	drillOff int
 }
 
 func newModel(code, addr, home string, opts pullOptions) model {
@@ -71,17 +109,20 @@ func newModel(code, addr, home string, opts pullOptions) model {
 	in.CharLimit = 40
 	in.Focus()
 	m := model{
-		screen: screenCode,
-		home:   home,
-		addr:   addr,
-		opts:   opts,
-		ctx:    ctx,
-		cancel: cancel,
-		input:  in,
-		spin:   spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(styleAccent)),
-		bar:    progress.New(progress.WithGradient("#7C3AED", "#34D399"), progress.WithoutPercentage()),
-		width:  80,
-		height: 24,
+		screen:  screenCode,
+		home:    home,
+		addr:    addr,
+		opts:    opts,
+		ctx:     ctx,
+		cancel:  cancel,
+		input:   in,
+		prompt:  textinput.New(),
+		spin:    spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(styleAccent)),
+		bar:     progress.New(progress.WithGradient("#7C3AED", "#34D399"), progress.WithoutPercentage()),
+		width:   80,
+		height:  24,
+		filters: map[string]itemFilter{},
+		kids:    map[string]childrenReply{},
 	}
 	if code != "" {
 		m.input.SetValue(code)
@@ -103,7 +144,28 @@ func (m model) connectCmd(code string) tea.Cmd {
 		if err != nil {
 			return errMsg{err}
 		}
-		return connectedMsg{sess}
+		var sel *savedSelection
+		if !m.opts.fresh {
+			sel = loadSelection(m.home, sess.peer.Host)
+		}
+		filters, kids := restoreSelection(sess, sel)
+		return connectedMsg{sess: sess, sel: sel, filters: filters, kids: kids}
+	}
+}
+
+func (m model) addCmd(paths []string) tea.Cmd {
+	sess := m.sess
+	return func() tea.Msg {
+		rep, err := sess.addPaths(paths)
+		return addedMsg{rep, err}
+	}
+}
+
+func (m model) kidsCmd(id string, drill bool) tea.Cmd {
+	sess, patterns := m.sess, m.filters[id].patterns
+	return func() tea.Msg {
+		rep, err := sess.children(id, patterns)
+		return kidsMsg{id: id, rep: rep, err: err, drill: drill}
 	}
 }
 
@@ -131,13 +193,46 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.sess = msg.sess
-		m.groups = buildGroups(msg.sess.items)
+		m.filters, m.kids = msg.filters, msg.kids
+		m.groups = buildGroups(msg.sess.items, msg.sel)
+		if msg.sel != nil {
+			m.custom = msg.sel.Custom
+			m.restored = true
+		}
 		m.vis = newVisual(msg.sess.sc.visual)
 		m.screen = screenPaired
 		return m, tickEvery(visFrame)
 	case errMsg:
 		m.err = msg.err
 		m.screen = screenError
+		return m, nil
+	case addedMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.status = styleErr.Render("✗ " + msg.err.Error())
+			return m, nil
+		}
+		for _, it := range msg.rep.Items {
+			m.addItem(it)
+		}
+		m.status = ""
+		if len(msg.rep.Items) > 0 {
+			m.status = styleOK.Render(fmt.Sprintf("✓ added %s", msg.rep.Items[0].Title()))
+		}
+		if len(msg.rep.Errors) > 0 {
+			m.status = styleErr.Render("✗ " + strings.Join(msg.rep.Errors, "; "))
+		}
+		return m, nil
+	case kidsMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.status = styleErr.Render("✗ " + msg.err.Error())
+			return m, nil
+		}
+		m.kids[msg.id] = msg.rep
+		if msg.drill {
+			m.mode, m.drillID, m.drillCur, m.drillOff = modeDrill, msg.id, 0, 0
+		}
 		return m, nil
 	case tickMsg:
 		if m.screen == screenPaired {
@@ -171,6 +266,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case screenSelect:
+			switch m.mode {
+			case modeFilter, modeAdd, modeExclude:
+				return m.updatePrompt(msg)
+			case modeDrill:
+				return m.updateDrill(msg)
+			}
 			return m.updateSelect(msg)
 		case screenRunning:
 			if msg.String() == "q" {
@@ -217,14 +318,18 @@ func (m model) updateCode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func buildGroups(items []Item) []group {
+func buildGroups(items []Item, sel *savedSelection) []group {
 	var gs []group
 	for _, k := range kindOrder {
 		g := group{kind: k, open: k != KindRepos && k != KindConfig}
 		for _, it := range items {
 			if it.Kind == k {
+				on := it.Default
+				if sel != nil {
+					on = sel.apply(it)
+				}
 				g.items = append(g.items, it)
-				g.selected = append(g.selected, it.Default)
+				g.selected = append(g.selected, on)
 			}
 		}
 		if len(g.items) > 0 {
@@ -234,26 +339,95 @@ func buildGroups(items []Item) []group {
 	return gs
 }
 
+func (m *model) addItem(it Item) {
+	for gi := range m.groups {
+		for _, existing := range m.groups[gi].items {
+			if existing.ID == it.ID {
+				return
+			}
+		}
+	}
+	if !contains(m.custom, it.Label) {
+		m.custom = append(m.custom, it.Label)
+	}
+	if len(m.groups) == 0 || m.groups[0].kind != KindCustom {
+		m.groups = append([]group{{kind: KindCustom, open: true}}, m.groups...)
+	}
+	m.groups[0].items = append(m.groups[0].items, it)
+	m.groups[0].selected = append(m.groups[0].selected, true)
+	m.groups[0].open = true
+}
+
+func (m model) matches(it Item) bool {
+	if m.filter == "" {
+		return true
+	}
+	q := strings.ToLower(m.filter)
+	return strings.Contains(strings.ToLower(it.Title()), q) || strings.Contains(strings.ToLower(it.Detail), q)
+}
+
 func (m model) rows() []row {
 	var rs []row
 	for gi, g := range m.groups {
-		rs = append(rs, row{gi, -1})
-		if g.open {
-			for i := range g.items {
-				rs = append(rs, row{gi, i})
+		var items []row
+		for i, it := range g.items {
+			if m.matches(it) {
+				items = append(items, row{gi, i})
 			}
+		}
+		if m.filter != "" && len(items) == 0 {
+			continue
+		}
+		rs = append(rs, row{gi, -1})
+		if g.open || m.filter != "" {
+			rs = append(rs, items...)
 		}
 	}
 	return rs
 }
 
-func (m model) listHeight() int { return max(3, m.height-7) }
+func (m model) listHeight() int { return max(3, m.height-9) }
+
+// itemSize reflects excludes once the peer has reported filtered children.
+func (m model) itemSize(it Item) int64 {
+	f, ok := m.filters[it.ID]
+	kids, cached := m.kids[it.ID]
+	if !ok || f.empty() || !cached {
+		return it.Size
+	}
+	return f.size(kids)
+}
+
+func (m model) currentRow() (row, bool) {
+	rs := m.rows()
+	if len(rs) == 0 {
+		return row{}, false
+	}
+	return rs[min(m.cursor, len(rs)-1)], true
+}
+
+func (m *model) startPrompt(md mode, placeholder, value string) tea.Cmd {
+	m.mode = md
+	m.prompt = textinput.New()
+	m.prompt.Placeholder = placeholder
+	m.prompt.CharLimit = 200
+	m.prompt.SetValue(value)
+	m.prompt.Focus()
+	m.status = ""
+	return textinput.Blink
+}
 
 func (m model) updateSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	rs := m.rows()
-	cur := rs[min(m.cursor, len(rs)-1)]
+	cur, ok := m.currentRow()
 	switch msg.String() {
-	case "q", "esc":
+	case "q":
+		return m.quit()
+	case "esc":
+		if m.filter != "" {
+			m.filter, m.cursor, m.offset = "", 0, 0
+			return m, nil
+		}
 		return m.quit()
 	case "up", "k":
 		m.cursor = max(0, m.cursor-1)
@@ -267,9 +441,31 @@ func (m model) updateSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cursor = 0
 	case "end", "G":
 		m.cursor = len(rs) - 1
+	case "/":
+		return m, m.startPrompt(modeFilter, "type to filter", m.filter)
+	case "+":
+		return m, m.startPrompt(modeAdd, "~/Documents/**/*.pdf or ~/Desktop/project", "")
+	case "-":
+		if ok && cur.i >= 0 {
+			return m, m.startPrompt(modeExclude, "*.log, /cache, node_modules", "")
+		}
 	case "right", "l", "tab":
-		m.groups[cur.g].open = true
+		if !ok {
+			break
+		}
+		if cur.i < 0 {
+			m.groups[cur.g].open = true
+			break
+		}
+		if !m.busy {
+			m.busy = true
+			m.status = styleDim.Render("listing…")
+			return m, m.kidsCmd(m.groups[cur.g].items[cur.i].ID, true)
+		}
 	case "left", "h":
+		if !ok {
+			break
+		}
 		m.groups[cur.g].open = false
 		for i, r := range m.rows() {
 			if r.g == cur.g && r.i == -1 {
@@ -277,39 +473,209 @@ func (m model) updateSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case " ", "x":
+		if !ok {
+			break
+		}
 		g := &m.groups[cur.g]
 		if cur.i >= 0 {
 			g.selected[cur.i] = !g.selected[cur.i]
-		} else {
-			all := g.count() == len(g.items)
-			for i := range g.selected {
-				g.selected[i] = !all
+			break
+		}
+		var visible []int
+		all := true
+		for i, it := range g.items {
+			if m.matches(it) {
+				visible = append(visible, i)
+				all = all && g.selected[i]
 			}
+		}
+		for _, i := range visible {
+			g.selected[i] = !all
 		}
 	case "a", "n":
 		for gi := range m.groups {
-			for i := range m.groups[gi].selected {
-				m.groups[gi].selected[i] = msg.String() == "a"
+			for i, it := range m.groups[gi].items {
+				if m.matches(it) {
+					m.groups[gi].selected[i] = msg.String() == "a"
+				}
 			}
 		}
 	case "enter":
-		items := m.selectedItems()
-		if len(items) == 0 {
-			return m, nil
-		}
-		m.st = newRunState(items)
-		m.lastTick = time.Now()
-		m.screen = screenRunning
-		go pull(m.ctx, m.sess, items, m.home, m.opts, m.st)
-		return m, tea.Batch(tick(), m.spin.Tick)
+		return m.startPull()
 	}
+	m.scrollTo(len(rs))
+	return m, nil
+}
+
+func (m *model) scrollTo(n int) {
 	h := m.listHeight()
+	m.cursor = max(0, min(m.cursor, n-1))
 	if m.cursor < m.offset {
 		m.offset = m.cursor
 	} else if m.cursor >= m.offset+h {
 		m.offset = m.cursor - h + 1
 	}
+}
+
+func (m model) updatePrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		if m.mode == modeFilter {
+			m.filter = ""
+		}
+		back := modeList
+		if m.mode == modeExclude && m.drillID != "" {
+			back = modeDrill
+		}
+		m.mode = back
+		return m, nil
+	case "enter":
+		val := strings.TrimSpace(m.prompt.Value())
+		switch m.mode {
+		case modeFilter:
+			m.filter, m.mode, m.cursor, m.offset = val, modeList, 0, 0
+			return m, nil
+		case modeAdd:
+			m.mode = modeList
+			if val == "" || m.busy {
+				return m, nil
+			}
+			m.busy = true
+			m.status = styleDim.Render("resolving " + val + " on " + m.sess.peer.Host + "…")
+			return m, m.addCmd(splitList(val))
+		case modeExclude:
+			id := m.excludeTarget()
+			back := modeList
+			if m.drillID != "" {
+				back = modeDrill
+			}
+			m.mode = back
+			if id == "" || val == "" {
+				return m, nil
+			}
+			f := m.filters[id]
+			if f.hidden == nil {
+				f.hidden = map[string]bool{}
+			}
+			for _, p := range splitList(val) {
+				if !contains(f.patterns, p) {
+					f.patterns = append(f.patterns, p)
+				}
+			}
+			m.filters[id] = f
+			m.busy = true
+			return m, m.kidsCmd(id, back == modeDrill)
+		}
+	}
+	var cmd tea.Cmd
+	m.prompt, cmd = m.prompt.Update(msg)
+	if m.mode == modeFilter {
+		m.filter, m.cursor, m.offset = m.prompt.Value(), 0, 0
+	}
+	return m, cmd
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func (m model) excludeTarget() string {
+	if m.drillID != "" {
+		return m.drillID
+	}
+	if cur, ok := m.currentRow(); ok && cur.i >= 0 {
+		return m.groups[cur.g].items[cur.i].ID
+	}
+	return ""
+}
+
+func (m model) updateDrill(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	kids := m.kids[m.drillID].Children
+	h := m.listHeight() - 2
+	switch msg.String() {
+	case "esc", "left", "h", "q":
+		m.mode, m.drillID = modeList, ""
+		return m, nil
+	case "up", "k":
+		m.drillCur = max(0, m.drillCur-1)
+	case "down", "j":
+		m.drillCur = min(len(kids)-1, m.drillCur+1)
+	case "pgup":
+		m.drillCur = max(0, m.drillCur-h)
+	case "pgdown":
+		m.drillCur = min(len(kids)-1, m.drillCur+h)
+	case " ", "x":
+		if len(kids) == 0 {
+			break
+		}
+		f := m.filters[m.drillID]
+		if f.hidden == nil {
+			f.hidden = map[string]bool{}
+		}
+		name := kids[m.drillCur].Name
+		f.hidden[name] = !f.hidden[name]
+		m.filters[m.drillID] = f
+	case "a", "n":
+		f := m.filters[m.drillID]
+		f.hidden = map[string]bool{}
+		if msg.String() == "n" {
+			for _, c := range kids {
+				f.hidden[c.Name] = true
+			}
+		}
+		m.filters[m.drillID] = f
+	case "-":
+		return m, m.startPrompt(modeExclude, "*.log, /cache, node_modules", "")
+	case "r":
+		f := m.filters[m.drillID]
+		f.patterns = nil
+		m.filters[m.drillID] = f
+		m.busy = true
+		return m, m.kidsCmd(m.drillID, true)
+	}
+	if m.drillCur < m.drillOff {
+		m.drillOff = m.drillCur
+	} else if m.drillCur >= m.drillOff+h {
+		m.drillOff = m.drillCur - h + 1
+	}
 	return m, nil
+}
+
+func (m model) startPull() (tea.Model, tea.Cmd) {
+	var items []Item
+	selected := map[string]bool{}
+	var all []Item
+	for _, g := range m.groups {
+		for i, it := range g.items {
+			all = append(all, it)
+			selected[it.ID] = g.selected[i]
+			if g.selected[i] {
+				it.Size = m.itemSize(it)
+				items = append(items, it)
+			}
+		}
+	}
+	if len(items) == 0 {
+		return m, nil
+	}
+	m.opts.excludes = map[string][]string{}
+	for id, f := range m.filters {
+		if ex := f.excludes(); len(ex) > 0 {
+			m.opts.excludes[id] = ex
+		}
+	}
+	selectionFrom(all, selected, m.custom, m.filters).save(m.home, m.sess.peer.Host)
+	m.st = newRunState(items)
+	m.lastTick = time.Now()
+	m.screen = screenRunning
+	go pull(m.ctx, m.sess, items, m.home, m.opts, m.st)
+	return m, tea.Batch(tick(), m.spin.Tick)
 }
 
 func (g group) count() int {
@@ -320,18 +686,6 @@ func (g group) count() int {
 		}
 	}
 	return n
-}
-
-func (m model) selectedItems() []Item {
-	var out []Item
-	for _, g := range m.groups {
-		for i, it := range g.items {
-			if g.selected[i] {
-				out = append(out, it)
-			}
-		}
-	}
-	return out
 }
 
 func (m *model) updateSpeed(now time.Time) {
@@ -369,7 +723,11 @@ func (m model) View() string {
 		b.WriteString("  Same cloud, color and spin as on " + styleBold.Render(m.sess.peer.Host) + "?\n\n")
 		b.WriteString(styleDim.Render("  enter yes, continue · q no, abort"))
 	case screenSelect:
-		b.WriteString(m.viewSelect())
+		if m.mode == modeDrill || (m.mode == modeExclude && m.drillID != "") {
+			b.WriteString(m.viewDrill())
+		} else {
+			b.WriteString(m.viewSelect())
+		}
 	case screenRunning:
 		b.WriteString(m.viewRunning())
 	case screenDone:
@@ -395,6 +753,9 @@ func (m model) headerText() string {
 		z := m.st.compressing
 		m.st.mu.Unlock()
 		txt += styleDim.Render(map[bool]string{true: " · zstd", false: " · raw"}[z])
+	}
+	if m.restored && m.screen == screenSelect {
+		txt += styleAccent.Render(" · last selection restored")
 	}
 	return txt
 }
@@ -423,7 +784,7 @@ func (m model) viewSelect() string {
 		}
 		if r.i == -1 {
 			caret := "▸"
-			if g.open {
+			if g.open || m.filter != "" {
 				caret = "▾"
 			}
 			n := g.count()
@@ -438,7 +799,7 @@ func (m model) viewSelect() string {
 			clones := 0
 			for i, it := range g.items {
 				if g.selected[i] {
-					size += it.Size
+					size += m.itemSize(it)
 					if it.Clone != nil {
 						clones++
 					}
@@ -455,12 +816,15 @@ func (m model) viewSelect() string {
 		}
 		it := g.items[r.i]
 		detail := it.Detail
+		if f, ok := m.filters[it.ID]; ok && !f.empty() {
+			detail = "✂ " + strings.Join(f.excludes(), " ") + " · " + detail
+		}
 		if it.Warn != "" {
 			detail = styleWarn.Render("⚠ "+it.Warn) + styleDim.Render(" · "+detail)
 		} else {
 			detail = styleDim.Render(ansi.Truncate(detail, detailW, "…"))
 		}
-		size := humanBytes(it.Size)
+		size := humanBytes(m.itemSize(it))
 		if it.Clone != nil && it.Size == 0 {
 			size = styleDim.Render("git")
 		}
@@ -471,24 +835,100 @@ func (m model) viewSelect() string {
 		b.WriteString("\n")
 	}
 
-	items := m.selectedItems()
 	var total int64
-	clones := 0
-	for _, it := range items {
-		total += it.Size
-		if it.Clone != nil {
-			clones++
+	clones, count := 0, 0
+	for _, g := range m.groups {
+		for i, it := range g.items {
+			if g.selected[i] {
+				count++
+				total += m.itemSize(it)
+				if it.Clone != nil {
+					clones++
+				}
+			}
 		}
 	}
-	summary := fmt.Sprintf("  %s selected · %s over the wire", plural(len(items), "item"), styleBold.Render(humanBytes(total)))
+	summary := fmt.Sprintf("  %s selected · up to %s over the wire", plural(count, "item"), styleBold.Render(humanBytes(total)))
 	if clones > 0 {
-		summary += fmt.Sprintf(" · %d repos cloned from their remotes", clones)
+		summary += fmt.Sprintf(" · %d repos cloned", clones)
 	}
-	if m.opts.overwrite {
-		summary += styleWarn.Render(" · overwrite on")
+	switch {
+	case m.opts.overwrite:
+		summary += styleWarn.Render(" · overwrite")
+	case m.opts.update:
+		summary += styleWarn.Render(" · update newer")
 	}
 	b.WriteString("\n" + summary + "\n")
-	b.WriteString(styleDim.Render("  ↑↓ move · space toggle · ←→ fold · a all · n none · enter pull · q quit"))
+	b.WriteString(m.footer(
+		"↑↓ move · space toggle · → look inside · ←→ fold · + add path · - exclude · / filter · a/n all/none · enter pull · q quit"))
+	return b.String()
+}
+
+func (m model) footer(keys string) string {
+	switch m.mode {
+	case modeFilter:
+		return "  " + styleAccent.Render("filter › ") + m.prompt.View() + styleDim.Render("   enter keep · esc clear")
+	case modeAdd:
+		return "  " + styleAccent.Render("add path or glob on "+m.sess.peer.Host+" › ") + m.prompt.View() + styleDim.Render("   comma-separate several · esc cancel")
+	case modeExclude:
+		return "  " + styleAccent.Render("exclude › ") + m.prompt.View() + styleDim.Render("   name anywhere · /anchored · ** any depth")
+	}
+	line := ""
+	if m.status != "" {
+		line = "  " + m.status + "\n"
+	} else if m.filter != "" && m.mode == modeList {
+		line = "  " + styleAccent.Render("filter: "+m.filter) + styleDim.Render(" (esc clears)") + "\n"
+	}
+	return line + styleDim.Render("  "+keys)
+}
+
+func (m model) viewDrill() string {
+	var b strings.Builder
+	var it Item
+	for _, g := range m.groups {
+		for _, x := range g.items {
+			if x.ID == m.drillID {
+				it = x
+			}
+		}
+	}
+	rep := m.kids[m.drillID]
+	f := m.filters[m.drillID]
+	kept := m.itemSize(it)
+	fmt.Fprintf(&b, "  %s  %s\n", styleBold.Render(it.Title()),
+		styleDim.Render(fmt.Sprintf("%s of %s selected", humanBytes(kept), humanBytes(rep.Size))))
+	if len(f.patterns) > 0 {
+		b.WriteString("  " + styleAccent.Render("✂ "+strings.Join(f.patterns, "  ")) + styleDim.Render("  (r clears)") + "\n")
+	} else {
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+	h := m.listHeight() - 2
+	nameW := max(20, min(50, m.width/2))
+	for i := m.drillOff; i < len(rep.Children) && i < m.drillOff+h; i++ {
+		c := rep.Children[i]
+		pointer := "  "
+		if i == m.drillCur {
+			pointer = styleCursor.Render("› ")
+		}
+		name := c.Name
+		if c.Dir {
+			name += "/"
+		}
+		files := ""
+		if c.Dir {
+			files = plural(c.Files, "file")
+		}
+		fmt.Fprintf(&b, "%s  %s %s %s  %s\n", pointer, checkbox(!f.hidden[c.Name]),
+			pad(ansi.Truncate(name, nameW, "…"), nameW), padLeft(humanBytes(c.Size), 10), styleDim.Render(files))
+	}
+	if len(rep.Children) == 0 {
+		b.WriteString(styleDim.Render("  nothing left after excludes") + "\n")
+	}
+	for i := len(rep.Children) - m.drillOff; i < h; i++ {
+		b.WriteString("\n")
+	}
+	b.WriteString("\n" + m.footer("↑↓ move · space toggle · a/n all/none · - exclude pattern · r clear patterns · esc back"))
 	return b.String()
 }
 
@@ -560,13 +1000,16 @@ func summaryLines(st *runState, styled bool) []string {
 	if end.IsZero() {
 		end = time.Now()
 	}
-	lines := []string{fmt.Sprintf("  done in %s · %s transferred", end.Sub(st.started).Round(time.Second), humanBytes(st.doneBytes)), ""}
+	lines := []string{fmt.Sprintf("  done in %s · %s checked", end.Sub(st.started).Round(time.Second), humanBytes(st.doneBytes)), ""}
 	if st.aborted != nil {
 		lines = append(lines, "  "+bad("✗ "+st.aborted.Error()))
 	}
 	lines = append(lines, "  "+ok("✓ ")+plural(st.written, "file")+" written")
+	if st.uptodate > 0 {
+		lines = append(lines, "  "+ok("✓ ")+fmt.Sprintf("%d already up to date (not transferred)", st.uptodate))
+	}
 	if st.skipped > 0 {
-		lines = append(lines, "  "+warn("• ")+fmt.Sprintf("%d already existed and were kept (use --overwrite to replace)", st.skipped))
+		lines = append(lines, "  "+warn("• ")+fmt.Sprintf("%d differ locally and were kept (--update takes newer, --overwrite replaces all)", st.skipped))
 	}
 	if st.cloned > 0 {
 		lines = append(lines, "  "+ok("✓ ")+plural(st.cloned, "repo")+" cloned")
@@ -602,7 +1045,7 @@ func summaryLines(st *runState, styled bool) []string {
 		next = append(next, "env files of failed clones are in ~/"+stagingDir)
 	}
 	if st.failed > 0 {
-		next = append(next, "fix the failures above and re-run hatch pull (existing files are kept)")
+		next = append(next, "fix the failures above and re-run hatch pull (only missing or changed files move)")
 	}
 	next = append(next, later...)
 	if len(next) > 0 {

@@ -9,7 +9,7 @@ Move your dev setup to a new machine, peer to peer over the local network. No cl
 
 <!-- demo: vhs demo.tape → demo.gif -->
 
-**Features:** mDNS discovery + CPace PAKE pairing (one online guess, no code ever on the wire) · AES-256-GCM encrypted, optionally compressed transfer · TUI checklist grouped by category · clean repos cloned from their remote, dirty ones copied with `.gitignore` respected · QR + sha256-pinned bootstrap for a Mac that doesn't have hatch yet · animated pairing-cloud to eyeball-verify the session key · Brewfile + generated `packages.sh` reinstall script · non-interactive `--yes` mode · `hatch scan`/`hatch config` previews.
+**Features:** mDNS discovery + CPace PAKE pairing (one online guess, no code ever on the wire) · AES-256-GCM encrypted, optionally compressed transfer · TUI checklist grouped by category, with ncdu-style drill-down to exclude subfolders and `+` to add your own paths/globs · incremental re-sync (manifest-based, only missing/changed files move) · remembered per-machine selection · clean repos cloned from their remote, dirty ones copied with `.gitignore` respected · QR + sha256-pinned bootstrap on a fixed port for a Mac that doesn't have hatch yet · animated pairing-cloud to eyeball-verify the session key · Brewfile + generated `packages.sh` reinstall script · non-interactive `--yes` mode · `hatch scan`/`hatch config` previews.
 
 ## How it works
 
@@ -24,7 +24,7 @@ hatch pull 42-tiger-mango
 
 1. `hatch serve` scans the old machine and starts listening, advertised over mDNS under a random public **nameplate** (`42`) plus a one-time **code** it prints.
 2. `hatch pull <code>` on the new machine resolves the nameplate over mDNS (or dials `--addr host:port` directly), then pairs using the two secret words in the code.
-3. Once paired, hatch shows a checklist TUI grouped by category — untick whatever you don't want.
+3. Once paired, hatch shows a checklist TUI grouped by category — untick whatever you don't want, drill into an item to exclude subfolders, or add your own paths.
 4. Selected items transfer over an encrypted, optionally compressed stream. Repos that are clean and pushed are cloned from their remote instead of copied.
 5. hatch prints a summary (files written, repos cloned, anything skipped or failed) and a numbered list of next steps: `brew bundle`, `chezmoi apply`, `packages.sh`, then the manual steps it detected on the old machine — Keychain-backed logins (Claude Code per config dir, gh, 1Password, Tailscale, WireGuard tunnels), Accessibility/Input Monitoring grants (Karabiner, AeroSpace, skhd, Raycast…), LaunchAgents to load, container volumes to dump.
 
@@ -32,13 +32,15 @@ On macOS both sides hold a `caffeinate` assertion while they run, so neither mac
 
 ### New machine without hatch yet
 
-`hatch serve` also serves its own binary on the same port and prints a QR plus a one-liner:
+`hatch serve` listens on a fixed port (`7788` by default, falling back to a random one if that's taken) so the bootstrap command and its QR stay the same across runs. It also serves its own binary on that port and prints the QR plus a compact one-liner:
 
 ```sh
-curl -fsSo /tmp/hatch http://old-mac.local:49547/hatch && echo "<sha256>  /tmp/hatch" | shasum -a 256 -c -q && chmod +x /tmp/hatch && /tmp/hatch pull 42-tiger-mango
+cd /tmp;curl -so h old-mac.local:7788/h&&shasum -a256 h|grep ^a1b2c3d4e5f6a7b8c9d0e1f2&&chmod +x h&&./h pull 42-tiger-mango
 ```
 
-Scan the QR with an iPhone, copy the text, and paste it on the new Mac (Universal Clipboard, same Apple ID). The sha256 travels screen → camera → clipboard, never over the network, so a LAN attacker can't swap the binary: a modified download fails `shasum -c` and the `&&` chain stops before it runs. The URL uses the Bonjour name (`name.local`), which macOS resolves on Wi-Fi and over a Thunderbolt Bridge alike. Files fetched with `curl` aren't quarantined, so Gatekeeper doesn't block the unsigned binary. The served binary is the one running `serve`, so both machines must share OS/arch (printed next to the command). Disable with `--no-bootstrap` / `--no-qr`.
+Scan the QR with an iPhone, copy the text, and paste it on the new Mac (Universal Clipboard, same Apple ID). The hash is a 96-bit (24 hex char) prefix of the binary's sha256 — short enough that the whole command fits QR version 6 (41×41 modules) while still costing ~2^96 work to forge. It travels screen → camera → clipboard, never over the network, so a LAN attacker can't swap the binary: `grep` prints the hash line back out as confirmation on a match, and on a mismatch it finds nothing, so the `&&` chain stops silently before `chmod`/`./h` ever run. The URL uses the Bonjour name (`name.local`), which macOS resolves on Wi-Fi and over a Thunderbolt Bridge alike. Files fetched with `curl` aren't quarantined, so Gatekeeper doesn't block the unsigned binary. The served binary is the one running `serve`, so both machines must share OS/arch (printed next to the command). Disable with `--no-bootstrap` / `--no-qr`.
+
+The QR itself renders as a crisp inline image (~26 columns wide) on iTerm2 or WezTerm outside tmux, and as compact half-blocks next to the instructions everywhere else. Force a mode with `HATCH_QR=image` or `HATCH_QR=blocks`.
 
 ### Pairing cloud
 
@@ -73,13 +75,23 @@ Build junk (`node_modules`, `.venv`, `dist`, `build`, `target`, framework caches
 - Files chezmoi manages are skipped by the scanner (dotfiles, `~/.config` entries) — run `chezmoi apply` on the new machine to restore them instead of transferring the rendered output.
 - The chezmoi source repo itself (`chezmoi source-path`) is offered as an ordinary repo item, so it clones or copies like any other repo.
 
+### Custom paths
+
+Anything you `+`-add during `hatch pull` (see [Choosing what to sync](#choosing-what-to-sync)) is resolved on the serving side, confined to `$HOME` (no escaping via `..` or an absolute path outside it), and still subject to the default excludes (build/OS junk, chezmoi-managed files). Each one is printed on the `hatch serve` terminal as it's added. Disable custom paths entirely with `hatch serve --no-custom`.
+
+## Re-running / incremental sync
+
+Before sending an item, `serve` sends a manifest (path, size, mtime); `pull` only asks for files that are missing or changed — same size and mtime means "up to date" and nothing is transferred. A local file that differs from the peer's is **kept by default**; `--update` replaces it when the peer's copy is newer, `--overwrite` replaces every differing file regardless of mtime. Brewfile and `packages.sh` are hatch-generated and always refresh.
+
+So re-running `hatch pull` against the same machine — e.g. a final catch-up right before wiping the old Mac — only moves the delta, and it's always safe to retry.
+
 ## Security
 
 - The code is `<nameplate>-<word>-<word>`, e.g. `42-tiger-mango`. The nameplate (1–99) is public — it's advertised in mDNS TXT records and only used to find the peer. The two words come from a 256-word list and are the actual secret.
 - Pairing uses [CPace](https://pkg.go.dev/filippo.io/cpace), a password-authenticated key exchange: both sides derive a shared key from the code without ever putting the code itself on the wire. A wrong guess only gets **one online attempt** — when a peer completes the exchange with the wrong code, `hatch serve` burns the code and exits, and nothing on the wire allows an offline brute-force.
 - Once paired, all traffic is AES-256-GCM, with separate HKDF-derived keys per direction and a monotonic counter nonce, so frames can't be replayed, reordered, or reflected back at the sender.
 - Extraction on the pulling side happens inside an `os.Root` rooted at `$HOME`, so a malicious or buggy peer can't write outside it via `../` or a symlink trick.
-- Existing files are never overwritten — matches are skipped and counted — unless you pass `--overwrite`.
+- A file already on disk is left alone unless it differs from the peer's and you pass `--update` (peer newer) or `--overwrite` (always) — see [Re-running / incremental sync](#re-running--incremental-sync).
 - Repo clones run with `GIT_TERMINAL_PROMPT=0` and, unless you've already set `GIT_SSH_COMMAND`, `ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new`: no interactive prompts, and unseen SSH host keys are trusted on first use (TOFU) instead of rejected. Fine for a fresh machine, but it means a MITM on that very first connection to a given host wouldn't be caught.
 
 ## Transport
@@ -144,7 +156,9 @@ Ensure `~/.local/bin` is on your `PATH` (or set `PREFIX=/usr/local make install`
 ## Usage
 
 ```sh
-hatch serve [--port N] [--no-mdns]          on the old machine: scan and wait for a pull
+hatch serve [--port N] [--no-mdns] [--no-qr] [--no-bootstrap] [--no-custom]
+                                             on the old machine: scan and wait for a pull;
+                                             also serves its own binary + a verified install command
 hatch pull [code] [flags]                   on the new machine: pick items and pull them
 hatch scan [--json]                         preview what serve would offer
 hatch config [--init]                       print the effective config (or write the default)
@@ -156,10 +170,20 @@ hatch version
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--addr host:port` | — | skip mDNS and dial directly (e.g. a Tailscale IP) |
-| `--overwrite` | off | replace files that already exist |
+| `--update` | off | replace a local file when the peer's copy is newer |
+| `--overwrite` | off | replace every local file that differs |
+| `--fresh` | off | ignore the selection remembered from the last pull |
 | `--compress mode` | `auto` | `auto` \| `on` \| `off` (`auto`: off on Thunderbolt/direct links) |
 | `--jobs N` | `4` | parallel git clones |
-| `--yes` | off | no TUI: pull the default selection and print progress |
+| `--yes` | off | no TUI: pull the default (or remembered) selection and print progress |
+
+`hatch serve --port` defaults to `7788` (falls back to a random port if that's taken). The wire protocol is versioned (currently v2) and pairing fails on a mismatch, so both machines need the same hatch version — the QR bootstrap above guarantees that for a machine that doesn't have it yet.
+
+### Choosing what to sync
+
+On the checklist, `→`/`l` on an item opens an ncdu-style drill-down listing its top-level children with sizes: `space` unticks a child (recorded as an anchored exclude `/name`), `a`/`n` tick all/none, `-` adds a free-form exclude pattern, `r` clears patterns, `esc` goes back.
+
+Back in the main list: `+` adds a path or glob resolved on the old machine, e.g. `~/Documents/**/*.pdf` or `~/Desktop/project` (comma-separate several) — these land in an **added by you** group. `-` adds exclude patterns to the item under the cursor, shown in its row as `✂ …`. `/` filters the list (`esc` clears the filter); with a filter active, `space` on a group header and `a`/`n` only touch the visible items. `enter` pulls the current selection either way.
 
 ### TUI keys
 
@@ -168,16 +192,34 @@ Shown on the checklist screen (`hatch pull` without `--yes`):
 | Key | Action |
 | --- | --- |
 | `↑`/`k`, `↓`/`j` | Move |
-| `→`/`l`/`tab` | Expand the current group |
+| `→`/`l`/`tab` | Expand the current group, or drill into the item under the cursor |
 | `←`/`h` | Collapse the current group |
-| `space`/`x` | Toggle the item, or the whole group from its header |
-| `a` / `n` | Select all / none |
+| `space`/`x` | Toggle the item, or the whole group from its header (visible items only, if filtered) |
+| `a` / `n` | Select all / none (visible items only, if filtered) |
+| `+` | Add a path or glob, comma-separated for several |
+| `-` | Add exclude patterns to the item under the cursor |
+| `/` | Filter the list (`esc` clears) |
 | `pgup`/`pgdown` | Page up/down |
 | `g`/`home`, `G`/`end` | Jump to top/bottom |
 | `enter` | Pull the current selection |
 | `q`/`esc` | Quit |
 
-While a pull is running, `q` aborts (existing files are kept, so re-running is safe).
+Inside a drill-down (`→` on an item):
+
+| Key | Action |
+| --- | --- |
+| `↑`/`k`, `↓`/`j` | Move |
+| `space`/`x` | Untick a child — recorded as an anchored exclude `/name` |
+| `a` / `n` | Tick all / none |
+| `-` | Add a free-form exclude pattern |
+| `r` | Clear patterns |
+| `esc`/`←`/`h`/`q` | Back to the list |
+
+While a pull is running, `q` aborts — safe to re-run, see [Re-running / incremental sync](#re-running--incremental-sync).
+
+### Remembered selection
+
+Every pull saves your ticks, added paths and excludes to `~/.local/share/hatch/selections/<host>.json`, keyed by the peer's hostname, and restores them next time you pull from that same machine — the header then shows **last selection restored**. `--fresh` ignores it and starts from the scanner's defaults. `--yes` also uses and saves it, so a scripted re-run keeps narrowing in on the same selection.
 
 ### Non-interactive: `--yes`
 
@@ -185,7 +227,7 @@ While a pull is running, `q` aborts (existing files are kept, so re-running is s
 hatch pull 42-tiger-mango --yes
 ```
 
-Skips the TUI, pulls every item the scanner flagged `default` on the serving side, and prints periodic progress plus a final summary. Useful for scripting or a headless box.
+Skips the TUI, pulls the remembered selection if there is one (otherwise every item the scanner flagged `default`), and prints periodic progress plus a final summary. Useful for scripting or a headless box.
 
 ### `hatch scan`
 

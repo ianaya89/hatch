@@ -15,9 +15,10 @@ const (
 	KindPaths   Kind = "folders"
 	KindRepos   Kind = "repos"
 	KindBrew    Kind = "brew"
+	KindCustom  Kind = "custom"
 )
 
-var kindOrder = []Kind{KindSecrets, KindConfig, KindAgents, KindRepos, KindPaths, KindBrew}
+var kindOrder = []Kind{KindCustom, KindSecrets, KindConfig, KindAgents, KindRepos, KindPaths, KindBrew}
 
 var kindLabel = map[Kind]string{
 	KindSecrets: "secrets",
@@ -26,6 +27,7 @@ var kindLabel = map[Kind]string{
 	KindRepos:   "repos",
 	KindPaths:   "folders",
 	KindBrew:    "packages",
+	KindCustom:  "added by you",
 }
 
 func kindIndex(k Kind) int {
@@ -83,6 +85,7 @@ type inventory struct {
 	byID     map[string]*source
 	warnings []string
 	hints    []string
+	scanner  *scanner
 }
 
 func newInventory(home string, sources []*source, warnings []string) *inventory {

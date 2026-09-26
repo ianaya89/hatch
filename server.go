@@ -12,9 +12,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/mdp/qrterminal/v3"
 )
+
+// A fixed default port keeps the bootstrap command (and its QR) identical
+// across runs; serve falls back to a random port if it's taken.
+const defaultPort = 7788
 
 type serveOptions struct {
 	port        int
@@ -22,6 +24,7 @@ type serveOptions struct {
 	noMDNS      bool
 	noBootstrap bool
 	noQR        bool
+	noCustom    bool
 }
 
 type inventoryReply struct {
@@ -65,6 +68,9 @@ func runServe(cfg Config, home string, opts serveOptions) error {
 	}
 
 	ln, err := net.Listen("tcp", ":"+strconv.Itoa(opts.port))
+	if err != nil && opts.port == defaultPort {
+		ln, err = net.Listen("tcp", ":0")
+	}
 	if err != nil {
 		return err
 	}
@@ -93,11 +99,19 @@ func runServe(cfg Config, home string, opts serveOptions) error {
 	if boot != nil {
 		cmd := boot.command(code)
 		fmt.Println()
-		fmt.Println(styleDim.Render("  no hatch there yet? scan with your iPhone, copy, paste in Terminal (" + boot.platform + "):"))
 		if !opts.noQR && isTTY(os.Stdout) {
-			qrterminal.GenerateHalfBlock(cmd, qrterminal.L, os.Stdout)
+			printQR(cmd, []string{
+				styleBold.Render("no hatch on the new Mac yet?"),
+				"1. scan this with your iPhone camera",
+				"2. tap the text → Copy",
+				"3. ⌘V in Terminal on the new Mac",
+				styleDim.Render("   (downloads, verifies sha256, pairs)"),
+				styleDim.Render("   " + boot.platform + " · same Apple ID for Universal Clipboard"),
+			})
+		} else {
+			fmt.Println(styleDim.Render("  no hatch there yet? run on the new machine (" + boot.platform + "):"))
 		}
-		fmt.Println("  " + cmd)
+		fmt.Println("  " + styleDim.Render(cmd))
 	}
 	fmt.Println()
 	if runtime.GOOS == "darwin" {
@@ -138,13 +152,13 @@ func runServe(cfg Config, home string, opts serveOptions) error {
 			conn.Close()
 			continue
 		}
-		err = serveSession(sc, inv, host, logf)
+		err = serveSession(sc, inv, host, !opts.noCustom, logf)
 		sc.Close()
 		return err
 	}
 }
 
-func serveSession(sc *secureConn, inv *inventory, host string, logf func(string, ...any)) error {
+func serveSession(sc *secureConn, inv *inventory, host string, allowCustom bool, logf func(string, ...any)) error {
 	var peer hello
 	if err := sc.recvJSON(&peer); err != nil {
 		return err
@@ -184,13 +198,41 @@ func serveSession(sc *secureConn, inv *inventory, host string, logf func(string,
 				continue
 			}
 			stopVisual()
-			n, err := sendSource(sc, src, req.Compress)
+			n, err := sendSource(sc, src, req)
 			if err != nil {
 				return err
 			}
 			total += n
 			sent++
 			logf("%s %s %s", styleAccent.Render("→"), src.Title(), styleDim.Render(humanBytes(n)))
+		case "children":
+			src := inv.byID[req.ID]
+			if src == nil {
+				sc.sendError(fmt.Errorf("unknown item %q", req.ID))
+				continue
+			}
+			if err := sc.sendJSON(src.children(compilePatterns(req.Exclude))); err != nil {
+				return err
+			}
+		case "add":
+			if !allowCustom {
+				sc.sendError(errors.New("custom paths are disabled on this machine (serve --no-custom)"))
+				continue
+			}
+			var rep addReply
+			for _, p := range req.Paths {
+				src, err := inv.addCustom(p)
+				if err != nil {
+					rep.Errors = append(rep.Errors, err.Error())
+					continue
+				}
+				rep.Items = append(rep.Items, src.Item)
+				stopVisual()
+				logf("%s %s · %s · %s", styleAccent.Render("+"), src.Title(), plural(src.Files, "file"), humanBytes(src.Size))
+			}
+			if err := sc.sendJSON(rep); err != nil {
+				return err
+			}
 		case "bye":
 			stopVisual()
 			logf("%s done · %s · %s", styleOK.Render("✓"), plural(sent, "item"), humanBytes(total))

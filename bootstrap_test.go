@@ -25,7 +25,7 @@ func TestBootstrapServesBinary(t *testing.T) {
 		}
 		boot.serve(s, br, t.Logf)
 	}()
-	c.Write([]byte("GET /hatch HTTP/1.1\r\nHost: mac.local\r\n\r\n"))
+	c.Write([]byte("GET /h HTTP/1.1\r\nHost: mac.local\r\n\r\n"))
 	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -36,7 +36,7 @@ func TestBootstrapServesBinary(t *testing.T) {
 	}
 
 	cmd := boot.command("42-tiger-mango")
-	for _, want := range []string{"http://mac.local:7788/hatch", boot.sum + "  /tmp/hatch", "shasum -a 256 -c", "/tmp/hatch pull 42-tiger-mango"} {
+	for _, want := range []string{"curl -so h mac.local:7788/h", "grep ^" + boot.sum[:bootstrapHashLen] + "&&", "./h pull 42-tiger-mango"} {
 		if !strings.Contains(cmd, want) {
 			t.Errorf("command missing %q:\n%s", want, cmd)
 		}
@@ -47,5 +47,13 @@ func TestHatchClientIsNotHTTP(t *testing.T) {
 	br := bufio.NewReader(strings.NewReader(magic + "xx"))
 	if isHTTPRequest(br) {
 		t.Fatal("hatch handshake mistaken for HTTP")
+	}
+}
+
+func TestBootstrapCommandFitsSmallQR(t *testing.T) {
+	boot := &bootstrap{sum: strings.Repeat("a", 64), host: "ianaya89-mbpro14.local", port: 7788}
+	cmd := boot.command("42-tiger-mango")
+	if len(cmd) > 134 {
+		t.Fatalf("command is %d bytes; keep it within QR version 6-L (134): %s", len(cmd), cmd)
 	}
 }

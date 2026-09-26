@@ -18,7 +18,7 @@ var version = "dev"
 const usage = `hatch — move your dev setup to a new machine, peer to peer.
 
 usage:
-  hatch serve [--port N] [--no-mdns] [--no-qr] [--no-bootstrap]
+  hatch serve [--port N] [--no-mdns] [--no-qr] [--no-bootstrap] [--no-custom]
                                               on the old machine: scan and wait for a pull;
                                               also serves its own binary + a verified install command
   hatch pull [code] [flags]                   on the new machine: pick items and pull them
@@ -28,7 +28,9 @@ usage:
 
 pull flags:
   --addr host:port    skip mDNS and dial directly (e.g. a Tailscale IP)
-  --overwrite         replace files that already exist (default: keep them)
+  --update            replace local files when the peer's copy is newer
+  --overwrite         replace every local file that differs (default: keep them)
+  --fresh             ignore the selection remembered from the last pull
   --compress mode     auto | on | off (auto: off on Thunderbolt/direct links)
   --jobs N            parallel git clones (default 4)
   --yes               no TUI: pull the default selection and print progress
@@ -94,11 +96,12 @@ func parseInterleaved(fs *flag.FlagSet, args []string) ([]string, error) {
 func cmdServe(home string, args []string) error {
 	fs := newFlags("serve")
 	var opts serveOptions
-	fs.IntVar(&opts.port, "port", 0, "")
+	fs.IntVar(&opts.port, "port", defaultPort, "")
 	fs.BoolVar(&opts.noMDNS, "no-mdns", false, "")
 	fs.StringVar(&opts.code, "code", "", "")
 	fs.BoolVar(&opts.noBootstrap, "no-bootstrap", false, "")
 	fs.BoolVar(&opts.noQR, "no-qr", false, "")
+	fs.BoolVar(&opts.noCustom, "no-custom", false, "")
 	if _, err := parseInterleaved(fs, args); err != nil {
 		return err
 	}
@@ -116,6 +119,8 @@ func cmdPull(home string, args []string) error {
 	var yes bool
 	fs.StringVar(&addr, "addr", "", "")
 	fs.BoolVar(&opts.overwrite, "overwrite", false, "")
+	fs.BoolVar(&opts.update, "update", false, "")
+	fs.BoolVar(&opts.fresh, "fresh", false, "")
 	fs.StringVar(&opts.compress, "compress", "auto", "")
 	fs.IntVar(&opts.jobs, "jobs", 4, "")
 	fs.BoolVar(&yes, "yes", false, "")
@@ -159,12 +164,37 @@ func pullPlain(code, addr, home string, opts pullOptions) error {
 	if err != nil {
 		return err
 	}
-	var items []Item
-	for _, it := range sess.items {
-		if it.Default {
-			items = append(items, it)
-		}
+	var sel *savedSelection
+	if !opts.fresh {
+		sel = loadSelection(home, sess.peer.Host)
 	}
+	filters, kids := restoreSelection(sess, sel)
+	opts.excludes = map[string][]string{}
+	for id, f := range filters {
+		opts.excludes[id] = f.excludes()
+	}
+	var items []Item
+	selected := map[string]bool{}
+	for _, it := range sess.items {
+		on := it.Default
+		if sel != nil {
+			on = sel.apply(it)
+		}
+		selected[it.ID] = on
+		if !on {
+			continue
+		}
+		if rep, ok := kids[it.ID]; ok {
+			it.Size = filters[it.ID].size(rep)
+		}
+		items = append(items, it)
+	}
+	var custom []string
+	if sel != nil {
+		custom = sel.Custom
+		fmt.Fprintf(os.Stderr, "  restored the selection from %s (--fresh to ignore)\n", sel.Saved.Format("2006-01-02 15:04"))
+	}
+	selectionFrom(sess.items, selected, custom, filters).save(home, sess.peer.Host)
 	fmt.Fprintf(os.Stderr, "  paired with %s via %s (%s) · %s\n", sess.peer.Host, sess.route, sess.addr, plural(len(items), "item"))
 	vis := newVisual(sess.sc.visual)
 	fmt.Fprintf(os.Stderr, "  compare with the cloud on %s:\n\n%s\n      %s\n\n", sess.peer.Host, vis.render(time.Now().UnixMilli()), vis.caption())

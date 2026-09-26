@@ -46,3 +46,16 @@ func TestRemotes(t *testing.T) {
 		t.Errorf("shortRemote = %q", got)
 	}
 }
+
+func TestDoubleStarMatchesZeroDirs(t *testing.T) {
+	re := globToRegexp("**/*.pdf")
+	for rel, want := range map[string]bool{"a.pdf": true, "x/a.pdf": true, "x/y/a.pdf": true, "a.txt": false} {
+		if re.MatchString(rel) != want {
+			t.Errorf("**/*.pdf vs %q: want %v", rel, want)
+		}
+	}
+	ps := compilePatterns([]string{"/cache", "*.log"})
+	if !ps.matchSelfOrParent("cache/a/b") || !ps.matchSelfOrParent("x/y.log") || ps.matchSelfOrParent("src/cache.go") {
+		t.Error("matchSelfOrParent")
+	}
+}

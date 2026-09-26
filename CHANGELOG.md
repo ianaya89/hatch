@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Choose what to sync: `→` on an item lists its children with sizes and lets you untick them; `-` adds exclude patterns; `+` adds paths or globs (`~/Documents/**/*.pdf`) resolved on the old machine; `/` filters the list.
+- Incremental sync: serve sends a manifest first and pull only requests missing or changed files; `--update` takes newer copies, `--overwrite` replaces every differing file.
+- The selection (ticks, custom paths, excludes) is remembered per source machine and restored on the next pull; `--fresh` ignores it.
+- `serve --no-custom` refuses custom paths from the puller.
+
+### Changed
+
+- Protocol v2: both machines must run the same hatch version (the QR bootstrap guarantees it).
+- Compact bootstrap command (96-bit sha256 prefix, fixed port 7788, `/h`) so the QR fits version 6; drawn as an inline image on iTerm2/WezTerm, as compact half-blocks next to the instructions elsewhere.
+- `**/` in patterns now also matches zero directories.
+
 ## [0.1.1] - 2026-09-26
 
 ### Changed

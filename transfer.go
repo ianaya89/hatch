@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,19 +20,80 @@ import (
 const smallFile = 8 << 20
 
 type fetchReply struct {
-	Files int   `json:"files"`
-	Size  int64 `json:"size"`
+	Files   int   `json:"files"`
+	Size    int64 `json:"size"`
+	Entries int   `json:"entries"`
 }
 
-func sendSource(sc *secureConn, src *source, compress bool) (int64, error) {
-	if err := sc.sendJSON(fetchReply{Files: src.Files, Size: src.Size}); err != nil {
+// manifestEntry lets the puller decide per file before any bytes move, which
+// turns a re-run into an incremental sync. T is f(ile), d(ir), l(ink) or
+// v(irtual, generated on the fly and always refreshed).
+type manifestEntry struct {
+	R string `json:"r"`
+	S int64  `json:"s,omitempty"`
+	M int64  `json:"m,omitempty"`
+	T string `json:"t"`
+}
+
+func manifestOf(f fileEntry) (manifestEntry, bool) {
+	if f.data != nil {
+		return manifestEntry{R: f.rel, S: int64(len(f.data)), T: "v"}, true
+	}
+	fi, err := os.Lstat(f.abs)
+	if err != nil {
+		return manifestEntry{}, false
+	}
+	switch {
+	case fi.IsDir():
+		return manifestEntry{R: f.rel, T: "d"}, true
+	case fi.Mode()&fs.ModeSymlink != 0:
+		return manifestEntry{R: f.rel, T: "l"}, true
+	case fi.Mode().IsRegular():
+		return manifestEntry{R: f.rel, S: fi.Size(), M: fi.ModTime().Unix(), T: "f"}, true
+	}
+	return manifestEntry{}, false
+}
+
+func sendSource(sc *secureConn, src *source, req request) (int64, error) {
+	var files []fileEntry
+	var entries []manifestEntry
+	var total int64
+	count := 0
+	for _, f := range src.filtered(compilePatterns(req.Exclude)) {
+		if e, ok := manifestOf(f); ok {
+			files = append(files, f)
+			entries = append(entries, e)
+			if e.T == "f" || e.T == "v" {
+				total += e.S
+				count++
+			}
+		}
+	}
+	if err := sc.sendJSON(fetchReply{Files: count, Size: total, Entries: len(entries)}); err != nil {
 		return 0, err
 	}
+	mw := newDataWriter(sc)
+	enc := json.NewEncoder(mw)
+	for _, e := range entries {
+		if err := enc.Encode(e); err != nil {
+			return 0, err
+		}
+	}
+	if err := mw.Close(); err != nil {
+		return 0, err
+	}
+	want, err := io.ReadAll(&dataReader{sc: sc})
+	if err != nil {
+		return 0, err
+	}
+	if len(want) != (len(entries)+7)/8 {
+		return 0, fmt.Errorf("bad want bitmap: %d bytes for %d entries", len(want), len(entries))
+	}
+
 	dw := newDataWriter(sc)
 	var w io.Writer = dw
 	var zw *zstd.Encoder
-	if compress {
-		var err error
+	if req.Compress {
 		zw, err = zstd.NewWriter(dw, zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderConcurrency(1))
 		if err != nil {
 			return 0, err
@@ -40,7 +102,10 @@ func sendSource(sc *secureConn, src *source, compress bool) (int64, error) {
 	}
 	tw := tar.NewWriter(w)
 	var sent int64
-	for _, f := range src.files {
+	for i, f := range files {
+		if want[i/8]&(1<<(i%8)) == 0 {
+			continue
+		}
 		n, err := writeEntry(tw, f)
 		if err != nil {
 			sc.sendError(fmt.Errorf("%s: %w", f.rel, err))
@@ -141,6 +206,7 @@ func (zeroReader) Read(p []byte) (int, error) {
 type extractStats struct {
 	written  int
 	skipped  int
+	uptodate int
 	failed   int
 	firstErr error
 	bytes    int64

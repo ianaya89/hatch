@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	protoVersion = 1
+	protoVersion = 2
 	chunkSize    = 256 << 10
 
 	msgJSON  byte = 'J'
@@ -24,9 +24,11 @@ type hello struct {
 }
 
 type request struct {
-	Op       string `json:"op"`
-	ID       string `json:"id,omitempty"`
-	Compress bool   `json:"compress,omitempty"`
+	Op       string   `json:"op"`
+	ID       string   `json:"id,omitempty"`
+	Compress bool     `json:"compress,omitempty"`
+	Exclude  []string `json:"exclude,omitempty"`
+	Paths    []string `json:"paths,omitempty"`
 }
 
 type remoteError struct {

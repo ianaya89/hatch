@@ -35,10 +35,14 @@ func globToRegexp(g string) *regexp.Regexp {
 	for i := 0; i < len(g); i++ {
 		switch c := g[i]; c {
 		case '*':
-			if i+1 < len(g) && g[i+1] == '*' {
+			switch {
+			case strings.HasPrefix(g[i:], "**/"):
+				b.WriteString("(?:.*/)?")
+				i += 2
+			case strings.HasPrefix(g[i:], "**"):
 				b.WriteString(".*")
 				i++
-			} else {
+			default:
 				b.WriteString("[^/]*")
 			}
 		case '?':
@@ -49,6 +53,17 @@ func globToRegexp(g string) *regexp.Regexp {
 	}
 	b.WriteString("$")
 	return regexp.MustCompile(b.String())
+}
+
+// matchSelfOrParent also excludes everything under a matching directory:
+// "/cache" drops cache/a/b, "*.git" drops x.git/objects/...
+func (ps patterns) matchSelfOrParent(rel string) bool {
+	for i := 0; i < len(rel); i++ {
+		if rel[i] == '/' && ps.match(rel[:i]) {
+			return true
+		}
+	}
+	return ps.match(rel)
 }
 
 // match takes a slash path relative to the item root. Name globs are tested

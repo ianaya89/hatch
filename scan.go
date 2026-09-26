@@ -66,6 +66,7 @@ func scanInventory(cfg Config, home string, progress func(string)) *inventory {
 	}
 	inv := newInventory(home, s.sources, s.warnings)
 	inv.hints = s.hints()
+	inv.scanner = s
 	return inv
 }
 

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func writeFile(t *testing.T, root, rel, body string, mode os.FileMode) {
@@ -101,7 +102,7 @@ func TestPullEndToEnd(t *testing.T) {
 			return
 		}
 		defer sc.Close()
-		served <- serveSession(sc, inv, "src", t.Logf)
+		served <- serveSession(sc, inv, "src", true, t.Logf)
 	}()
 
 	sess, err := connect(context.Background(), code, ln.Addr().String())
@@ -162,5 +163,87 @@ func TestPullEndToEnd(t *testing.T) {
 	}
 	if st.failed != 1 || !st.staged {
 		t.Errorf("want exactly the unreachable clone to fail with staged env, got failed=%d staged=%v", st.failed, st.staged)
+	}
+}
+
+func pullOnce(t *testing.T, inv *inventory, dst string, opts pullOptions, pick func(Item) bool) *runState {
+	t.Helper()
+	const code = "9-otter-radar"
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	served := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			served <- err
+			return
+		}
+		sc, err := serverHandshake(conn, bufio.NewReader(conn), code, 9)
+		if err != nil {
+			served <- err
+			return
+		}
+		defer sc.Close()
+		served <- serveSession(sc, inv, "src", true, t.Logf)
+	}()
+	sess, err := connect(context.Background(), code, ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var items []Item
+	for _, it := range sess.items {
+		if pick(it) {
+			items = append(items, it)
+		}
+	}
+	st := newRunState(items)
+	pull(context.Background(), sess, items, dst, opts, st)
+	if err := <-served; err != nil {
+		t.Fatalf("server: %v", err)
+	}
+	return st
+}
+
+func TestIncrementalSync(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	writeFile(t, src, ".config/tool/a.json", "one", 0o644)
+	writeFile(t, src, ".config/tool/b.json", "two", 0o644)
+	writeFile(t, src, ".config/tool/debug.log", "noise", 0o644)
+	cfg := defaultConfig()
+	cfg.Brew, cfg.Chezmoi, cfg.Packages = false, false, false
+	cfg.DevRoots, cfg.ExtraRepos, cfg.State = nil, nil, nil
+	isTool := func(it Item) bool { return it.Path == ".config/tool" }
+	opts := pullOptions{compress: "on", excludes: map[string][]string{"config:.config/tool": {"*.log"}}}
+
+	st := pullOnce(t, scanInventory(cfg, src, nil), dst, opts, isTool)
+	if st.written != 2 || st.failed != 0 {
+		t.Fatalf("first pull: written=%d failed=%d", st.written, st.failed)
+	}
+	if _, err := os.Stat(filepath.Join(dst, ".config/tool/debug.log")); err == nil {
+		t.Fatal("excluded file was transferred")
+	}
+
+	st = pullOnce(t, scanInventory(cfg, src, nil), dst, opts, isTool)
+	if st.written != 0 || st.uptodate != 2 {
+		t.Fatalf("second pull should move nothing: written=%d uptodate=%d", st.written, st.uptodate)
+	}
+
+	writeFile(t, src, ".config/tool/a.json", "one, edited", 0o644)
+	later := time.Now().Add(time.Hour)
+	os.Chtimes(filepath.Join(src, ".config/tool/a.json"), later, later)
+	st = pullOnce(t, scanInventory(cfg, src, nil), dst, opts, isTool)
+	if st.written != 0 || st.skipped != 1 {
+		t.Fatalf("changed file must be kept by default: written=%d kept=%d", st.written, st.skipped)
+	}
+	opts.update = true
+	st = pullOnce(t, scanInventory(cfg, src, nil), dst, opts, isTool)
+	if st.written != 1 || st.uptodate != 1 {
+		t.Fatalf("--update should take the newer copy: written=%d uptodate=%d", st.written, st.uptodate)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dst, ".config/tool/a.json")); string(b) != "one, edited" {
+		t.Fatalf("content = %q", b)
 	}
 }

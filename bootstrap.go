@@ -68,13 +68,18 @@ func bootstrapHost() string {
 	return h
 }
 
+const bootstrapHashLen = 24
+
 func (b *bootstrap) url() string {
-	return "http://" + net.JoinHostPort(b.host, strconv.Itoa(b.port)) + "/hatch"
+	return net.JoinHostPort(b.host, strconv.Itoa(b.port)) + "/h"
 }
 
+// command is kept short because it becomes the QR payload: fewer bytes means
+// a lower QR version and a smaller code on screen. A 96-bit sha256 prefix
+// still needs ~2^96 work to forge a matching binary.
 func (b *bootstrap) command(code string) string {
-	return fmt.Sprintf(`curl -fsSo /tmp/hatch %s && echo "%s  /tmp/hatch" | shasum -a 256 -c -q && chmod +x /tmp/hatch && /tmp/hatch pull %s`,
-		b.url(), b.sum, code)
+	return fmt.Sprintf("cd /tmp;curl -so h %s&&shasum -a256 h|grep ^%s&&chmod +x h&&./h pull %s",
+		b.url(), b.sum[:bootstrapHashLen], code)
 }
 
 func isHTTPRequest(br *bufio.Reader) bool {
@@ -98,7 +103,7 @@ func (b *bootstrap) serve(conn net.Conn, br *bufio.Reader, logf func(string, ...
 		Header:     http.Header{"Content-Type": {"text/plain"}},
 	}
 	var body []byte
-	if req.URL.Path == "/hatch" {
+	if req.URL.Path == "/h" || req.URL.Path == "/hatch" {
 		resp.StatusCode = http.StatusOK
 		resp.Header.Set("Content-Type", "application/octet-stream")
 		body = b.bin

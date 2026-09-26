@@ -1,0 +1,68 @@
+version: 2
+project_name: hatch
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: hatch
+    binary: hatch
+    main: .
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: hatch
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^ci:'
+      - '^chore:'
+
+release:
+  draft: false
+  prerelease: auto
+
+homebrew_casks:
+  - name: hatch
+    repository:
+      owner: ianaya89
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Casks
+    homepage: https://github.com/ianaya89/hatch
+    description: Move your dev setup to a new machine, peer to peer
+    commit_author:
+      name: goreleaser
+      email: goreleaser@users.noreply.github.com
+    # the binary isn't code-signed/notarized; strip the quarantine flag on install
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr",
+              args: ["-dr", "com.apple.quarantine", "#{staged_path}/hatch"]
+          end

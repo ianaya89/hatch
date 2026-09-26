@@ -5,7 +5,11 @@
 ![Go](https://img.shields.io/github/go-mod/go-version/ianaya89/hatch)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Move your dev setup to a new machine, peer to peer over the local network. No cloud, no USB drive, no manually remembering which dotfiles you never put in a dotfiles manager.
+Move your dev setup to a new machine, peer to peer over the local network. No cloud, no USB drive, no manually remembering which dotfiles you never put in a dotfiles manager. Built with Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea).
+
+<!-- demo: vhs demo.tape → demo.gif -->
+
+**Features:** mDNS discovery + CPace PAKE pairing (one online guess, no code ever on the wire) · AES-256-GCM encrypted, optionally compressed transfer · TUI checklist grouped by category · clean repos cloned from their remote, dirty ones copied with `.gitignore` respected · QR + sha256-pinned bootstrap for a Mac that doesn't have hatch yet · animated pairing-cloud to eyeball-verify the session key · Brewfile + generated `packages.sh` reinstall script · non-interactive `--yes` mode · `hatch scan`/`hatch config` previews.
 
 ## How it works
 
@@ -93,6 +97,8 @@ Build junk (`node_modules`, `.venv`, `dist`, `build`, `target`, framework caches
 | Any (with Go) | `go install` |
 
 ### Install script (Linux / macOS)
+
+Downloads the right release tarball for your OS/arch, verifies its checksum, and installs `hatch`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ianaya89/hatch/main/install.sh | sh
@@ -197,7 +203,18 @@ hatch config          # print the effective config (defaults + your file), with 
 hatch config --init   # write the default config to that path (fails if it already exists)
 ```
 
-Config lives at `~/.config/hatch/config.toml` (or `$HATCH_CONFIG`) and is TOML. **Any key you set replaces its default outright** — arrays don't merge, so if you set `secrets = [...]`, list everything you want, including whatever defaults you meant to keep.
+See [Configuration](#configuration) for the file format.
+
+## Configuration
+
+Config lives at `~/.config/hatch/config.toml` (or `$HATCH_CONFIG`) and is TOML.
+
+| Env var | Effect |
+| --- | --- |
+| `HATCH_HOME` | act on this directory instead of `$HOME` (also shifts the default config path) |
+| `HATCH_CONFIG` | config file path, overrides the default location |
+
+**Any key you set replaces its default outright** — arrays don't merge, so if you set `secrets = [...]`, list everything you want, including whatever defaults you meant to keep.
 
 ```toml
 # hatch config — any key set here replaces its default.
@@ -205,18 +222,13 @@ dev_roots     = ["~/code"]
 secret_ignore = ["/logs", "*.bak"]
 ```
 
-Pattern syntax used by `exclude`, `secret_ignore`, `agent_ignore`, `dotfile_junk`, `repo_extras`:
+### Pattern syntax
+
+Used by `exclude`, `secret_ignore`, `agent_ignore`, `dotfile_junk`, `repo_extras`:
 
 - no `/` → matches the name anywhere (a basename glob), e.g. `*.lock`
 - leading `/` → anchored to the item's own root, e.g. `/logs`
 - `**` → any depth, `*` → one path segment, `?` → one character
-
-### Env vars
-
-| Var | Effect |
-| --- | --- |
-| `HATCH_HOME` | act on this directory instead of `$HOME` (also shifts the default config path) |
-| `HATCH_CONFIG` | config file path, overrides the default location |
 
 ## Try it locally
 

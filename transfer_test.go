@@ -77,3 +77,20 @@ func TestExtractKeepsExisting(t *testing.T) {
 		t.Fatalf("overwrite ignored: %q", b)
 	}
 }
+
+func TestExtractTruncatedFileLeavesNothing(t *testing.T) {
+	home := t.TempDir()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	tw.WriteHeader(&tar.Header{Name: "big.bin", Typeflag: tar.TypeReg, Mode: 0o644, Size: 1000})
+	tw.Write([]byte("only a little"))
+	ex := newTestExtractor(t, home)
+	if err := ex.extract(bytes.NewReader(buf.Bytes()), false); err == nil {
+		t.Fatal("truncated stream extracted without error")
+	}
+	for _, name := range []string{"big.bin", "big.bin" + partSuffix} {
+		if _, err := os.Stat(filepath.Join(home, name)); err == nil {
+			t.Fatalf("%s left behind after a cut transfer", name)
+		}
+	}
+}

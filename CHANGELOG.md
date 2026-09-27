@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-27
+
+### Fixed
+
+- Inline QR (iTerm2/WezTerm) was a tiny code in a large white square: rsc.io/qr scales the image bounds but not the modules. The PNG is now rasterized at scale, in an 18×9 cell box beside the instructions.
+- A file cut short by a dropped connection could land under its real name and then be kept by the next incremental pull as a "local edit". Files are now written to `*.hatch-part` and renamed into place only when complete.
+
 ## [0.2.0] - 2026-09-26
 
 ### Added
@@ -46,7 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bootstrap: `serve` serves its own binary on the same port (HTTP is detected by peeking the first bytes) and prints a QR + one-liner that verifies the sha256 before running `hatch pull`.
 - Pairing cloud: both peers draw the same spinning 3D braille particle cloud (orb/ring/galaxy/helix, palette, arms, tilt, spin from the session key), rotated by wall-clock time so both screens move in sync; the TUI asks to confirm the match.
 
-[Unreleased]: https://github.com/ianaya89/hatch/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/ianaya89/hatch/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/ianaya89/hatch/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/ianaya89/hatch/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/ianaya89/hatch/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/ianaya89/hatch/releases/tag/v0.1.0

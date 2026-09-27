@@ -17,7 +17,10 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-const smallFile = 8 << 20
+const (
+	smallFile  = 8 << 20
+	partSuffix = ".hatch-part"
+)
 
 type fetchReply struct {
 	Files   int   `json:"files"`
@@ -301,7 +304,11 @@ func (e *extractor) entry(tr *tar.Reader, hdr *tar.Header, name string) error {
 		if err := e.root.MkdirAll(filepath.Dir(name), 0o755); err != nil {
 			return err
 		}
-		f, err := e.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+		// A file cut short by a dropped link must never land under its real
+		// name: the next incremental pull would see it as a local edit and
+		// keep it. Write aside, stamp mode+mtime, then rename into place.
+		part := name + partSuffix
+		f, err := e.root.OpenFile(part, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 		if err != nil {
 			return err
 		}
@@ -309,14 +316,21 @@ func (e *extractor) entry(tr *tar.Reader, hdr *tar.Header, name string) error {
 		if cerr := f.Close(); err == nil {
 			err = cerr
 		}
+		if err == nil {
+			err = e.root.Chmod(part, mode)
+		}
+		if err == nil {
+			err = e.root.Chtimes(part, hdr.ModTime, hdr.ModTime)
+		}
+		if err == nil {
+			err = e.root.Rename(part, name)
+		}
 		if err != nil {
+			e.root.Remove(part)
 			return err
 		}
 		e.stats.written++
-		if err := e.root.Chmod(name, mode); err != nil {
-			return err
-		}
-		return e.root.Chtimes(name, hdr.ModTime, hdr.ModTime)
+		return nil
 	}
 	return nil
 }

@@ -31,6 +31,7 @@ pull flags:
   --update            replace local files when the peer's copy is newer
   --overwrite         replace every local file that differs (default: keep them)
   --fresh             ignore the selection remembered from the last pull
+  --dry-run           show what would be written, kept or cloned; change nothing
   --compress mode     auto | on | off (auto: off on Thunderbolt/direct links)
   --jobs N            parallel git clones (default 4)
   --yes               no TUI: pull the default selection and print progress
@@ -121,6 +122,7 @@ func cmdPull(home string, args []string) error {
 	fs.BoolVar(&opts.overwrite, "overwrite", false, "")
 	fs.BoolVar(&opts.update, "update", false, "")
 	fs.BoolVar(&opts.fresh, "fresh", false, "")
+	fs.BoolVar(&opts.dryRun, "dry-run", false, "")
 	fs.StringVar(&opts.compress, "compress", "auto", "")
 	fs.IntVar(&opts.jobs, "jobs", 4, "")
 	fs.BoolVar(&yes, "yes", false, "")

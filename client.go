@@ -105,6 +105,7 @@ type pullOptions struct {
 	compress  string
 	jobs      int
 	fresh     bool
+	dryRun    bool
 	excludes  map[string][]string
 }
 
@@ -164,6 +165,11 @@ type runState struct {
 	written     int
 	skipped     int
 	uptodate    int
+	planned     int
+	plannedSize int64
+	plannedRepo int
+	dryRun      bool
+	masApps     int
 	cloned      int
 	failed      int
 	finished    bool
@@ -237,6 +243,7 @@ func pull(ctx context.Context, sess *session, items []Item, home string, opts pu
 	st.mu.Lock()
 	st.compressing = compress
 	st.hints = sess.hints
+	st.dryRun = opts.dryRun
 	st.mu.Unlock()
 
 	var copies, clones []Item
@@ -266,13 +273,14 @@ func pull(ctx context.Context, sess *session, items []Item, home string, opts pu
 			st.set(it.ID, statusFailed, statsNote(stats), err)
 			continue
 		}
-		if it.Kind == KindBrew {
+		if it.Kind == KindBrew && !opts.dryRun {
 			dest := filepath.Join(home, filepath.FromSlash(it.Path))
 			st.mu.Lock()
 			if it.ID == "packages" {
 				st.packages = dest
 			} else {
 				st.brewfile = dest
+				st.masApps = countMasApps(dest)
 			}
 			st.mu.Unlock()
 		}
@@ -291,14 +299,27 @@ func pull(ctx context.Context, sess *session, items []Item, home string, opts pu
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			st.set(it.ID, statusRunning, "cloning", nil)
-			note, err := cloneRepo(ctx, home, it)
+			var note string
+			var err error
+			if opts.dryRun {
+				note = planClone(home, it)
+				if note != "already there" {
+					st.mu.Lock()
+					st.plannedRepo++
+					st.mu.Unlock()
+				}
+			} else {
+				note, err = cloneRepo(ctx, home, it)
+			}
 			mu.Lock()
 			cloneErr[it.ID] = err
 			mu.Unlock()
 			if err == nil && it.Files == 0 {
-				st.mu.Lock()
-				st.cloned++
-				st.mu.Unlock()
+				if !opts.dryRun {
+					st.mu.Lock()
+					st.cloned++
+					st.mu.Unlock()
+				}
 				st.set(it.ID, statusDone, note, nil)
 			} else if err != nil && it.Files == 0 {
 				st.set(it.ID, statusFailed, "", err)
@@ -318,7 +339,7 @@ func pull(ctx context.Context, sess *session, items []Item, home string, opts pu
 			continue
 		}
 		prefix := ""
-		if cerr != nil {
+		if cerr != nil && !opts.dryRun {
 			prefix = stagingDir
 			st.mu.Lock()
 			st.staged = true
@@ -335,6 +356,8 @@ func pull(ctx context.Context, sess *session, items []Item, home string, opts pu
 			st.set(it.ID, statusFailed, "env files staged", cerr)
 		case err != nil:
 			st.set(it.ID, statusFailed, "", err)
+		case opts.dryRun:
+			st.set(it.ID, statusDone, planClone(home, it)+" · "+statsNote(stats), nil)
 		default:
 			st.mu.Lock()
 			st.cloned++
@@ -354,6 +377,8 @@ func (st *runState) recordStats(s extractStats) {
 	st.written += s.written
 	st.skipped += s.skipped
 	st.uptodate += s.uptodate
+	st.planned += s.planned
+	st.plannedSize += s.plannedSize
 	st.mu.Unlock()
 }
 
@@ -366,11 +391,18 @@ func (s extractStats) err() error {
 
 func statsNote(s extractStats) string {
 	note := plural(s.written, "file")
+	kept := "existed, kept"
+	if s.dry {
+		note, kept = "nothing to write", "differ, would keep"
+		if s.planned > 0 {
+			note = fmt.Sprintf("would write %s (%s)", plural(s.planned, "file"), humanBytes(s.plannedSize))
+		}
+	}
 	if s.uptodate > 0 {
 		note += fmt.Sprintf(" · %d up to date", s.uptodate)
 	}
 	if s.skipped > 0 {
-		note += fmt.Sprintf(" · %d existed, kept", s.skipped)
+		note += fmt.Sprintf(" · %d %s", s.skipped, kept)
 	}
 	return note
 }
@@ -401,6 +433,14 @@ func fetch(sess *session, root *os.Root, it Item, prefix string, compress bool, 
 		}
 		switch decide(root, prefix, e, opts) {
 		case wantIt:
+			if opts.dryRun {
+				if e.T != "d" {
+					stats.planned++
+					stats.plannedSize += e.S
+				}
+				onBytes(e.S)
+				break
+			}
 			want[i/8] |= 1 << (i % 8)
 		case upToDate:
 			stats.uptodate++
@@ -429,6 +469,7 @@ func fetch(sess *session, root *os.Root, it Item, prefix string, compress bool, 
 		err = derr
 	}
 	ex.stats.uptodate, ex.stats.skipped = stats.uptodate, stats.skipped
+	ex.stats.planned, ex.stats.plannedSize, ex.stats.dry = stats.planned, stats.plannedSize, opts.dryRun
 	return ex.stats, dr.done, err
 }
 
@@ -474,6 +515,30 @@ func decide(root *os.Root, prefix string, e manifestEntry, opts pullOptions) dec
 		return wantIt
 	}
 	return keepLocal
+}
+
+// countMasApps finds App Store entries: `brew bundle` can only install them
+// once the new machine is signed in to the App Store.
+func countMasApps(brewfile string) int {
+	b, err := os.ReadFile(brewfile)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "mas ") {
+			n++
+		}
+	}
+	return n
+}
+
+func planClone(home string, it Item) string {
+	dest := filepath.Join(home, filepath.FromSlash(it.Path))
+	if entries, err := os.ReadDir(dest); err == nil && len(entries) > 0 {
+		return "already there"
+	}
+	return "would clone " + shortRemote(it.Clone.Remote)
 }
 
 func cloneRepo(ctx context.Context, home string, it Item) (string, error) {

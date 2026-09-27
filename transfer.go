@@ -207,12 +207,15 @@ func (zeroReader) Read(p []byte) (int, error) {
 }
 
 type extractStats struct {
-	written  int
-	skipped  int
-	uptodate int
-	failed   int
-	firstErr error
-	bytes    int64
+	written     int
+	skipped     int
+	uptodate    int
+	planned     int
+	failed      int
+	dry         bool
+	firstErr    error
+	bytes       int64
+	plannedSize int64
 }
 
 type extractor struct {

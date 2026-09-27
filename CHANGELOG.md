@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `hatch pull --dry-run`: negotiate the manifest but transfer and clone nothing; report what would be written, kept and cloned.
+- The next-steps checklist starts with "sign in to the App Store" when the received Brewfile has `mas` apps, since `brew bundle` can't install them otherwise.
+
 ## [0.2.1] - 2026-09-27
 
 ### Fixed

@@ -26,7 +26,7 @@ hatch pull 42-tiger-mango
 2. `hatch pull <code>` on the new machine resolves the nameplate over mDNS (or dials `--addr host:port` directly), then pairs using the two secret words in the code.
 3. Once paired, hatch shows a checklist TUI grouped by category — untick whatever you don't want, drill into an item to exclude subfolders, or add your own paths.
 4. Selected items transfer over an encrypted, optionally compressed stream. Repos that are clean and pushed are cloned from their remote instead of copied.
-5. hatch prints a summary (files written, repos cloned, anything skipped or failed) and a numbered list of next steps: `brew bundle`, `chezmoi apply`, `packages.sh`, then the manual steps it detected on the old machine — Keychain-backed logins (Claude Code per config dir, gh, 1Password, Tailscale, WireGuard tunnels), Accessibility/Input Monitoring grants (Karabiner, AeroSpace, skhd, Raycast…), LaunchAgents to load, container volumes to dump.
+5. hatch prints a summary (files written, repos cloned, anything skipped or failed) and a numbered list of next steps: signing in to the App Store when the Brewfile has `mas` apps, `brew bundle`, `chezmoi apply`, `packages.sh`, then the manual steps it detected on the old machine — Keychain-backed logins (Claude Code per config dir, gh, 1Password, Tailscale, WireGuard tunnels), Accessibility/Input Monitoring grants (Karabiner, AeroSpace, skhd, Raycast…), LaunchAgents to load, container volumes to dump.
 
 On macOS both sides hold a `caffeinate` assertion while they run, so neither machine idle-sleeps mid-transfer.
 
@@ -84,6 +84,9 @@ Anything you `+`-add during `hatch pull` (see [Choosing what to sync](#choosing-
 Before sending an item, `serve` sends a manifest (path, size, mtime); `pull` only asks for files that are missing or changed — same size and mtime means "up to date" and nothing is transferred. A local file that differs from the peer's is **kept by default**; `--update` replaces it when the peer's copy is newer, `--overwrite` replaces every differing file regardless of mtime. Brewfile and `packages.sh` are hatch-generated and always refresh.
 
 So re-running `hatch pull` against the same machine — e.g. a final catch-up right before wiping the old Mac — only moves the delta, and it's always safe to retry.
+
+
+To preview a pull first, add `--dry-run`: hatch negotiates the same manifest but asks for no files and clones nothing, then reports what it *would* write, keep and clone. The selection is saved as usual, so running the same pull without the flag applies exactly that plan.
 
 ## Security
 
@@ -173,6 +176,7 @@ hatch version
 | `--update` | off | replace a local file when the peer's copy is newer |
 | `--overwrite` | off | replace every local file that differs |
 | `--fresh` | off | ignore the selection remembered from the last pull |
+| `--dry-run` | off | show what would be written, kept or cloned; change nothing (the selection is still saved) |
 | `--compress mode` | `auto` | `auto` \| `on` \| `off` (`auto`: off on Thunderbolt/direct links) |
 | `--jobs N` | `4` | parallel git clones |
 | `--yes` | off | no TUI: pull the default (or remembered) selection and print progress |

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -245,5 +246,45 @@ func TestIncrementalSync(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(dst, ".config/tool/a.json")); string(b) != "one, edited" {
 		t.Fatalf("content = %q", b)
+	}
+}
+
+func TestDryRunChangesNothing(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	buildFixture(t, src)
+	cfg := defaultConfig()
+	cfg.Brew, cfg.Chezmoi, cfg.Packages = false, false, false
+	cfg.DevRoots, cfg.ExtraRepos = []string{"~/Development"}, nil
+	all := func(it Item) bool { return it.Default }
+
+	st := pullOnce(t, scanInventory(cfg, src, nil), dst, pullOptions{compress: "on", dryRun: true}, all)
+	entries, _ := os.ReadDir(dst)
+	if len(entries) != 0 {
+		t.Fatalf("dry run wrote %d entries into the target", len(entries))
+	}
+	if st.planned == 0 || st.written != 0 || st.plannedRepo != 1 || st.cloned != 0 {
+		t.Fatalf("dry run plan: planned=%d written=%d repos=%d cloned=%d", st.planned, st.written, st.plannedRepo, st.cloned)
+	}
+	planned := st.planned
+
+	st = pullOnce(t, scanInventory(cfg, src, nil), dst, pullOptions{compress: "on"}, all)
+	if st.written != planned {
+		t.Fatalf("real pull wrote %d files, dry run promised %d", st.written, planned)
+	}
+}
+
+func TestAppStoreHintComesBeforeBrewBundle(t *testing.T) {
+	dir := t.TempDir()
+	bf := filepath.Join(dir, "Brewfile")
+	os.WriteFile(bf, []byte("brew \"git\"\nmas \"Xcode\", id: 497799835\n  mas \"Things\", id: 904280696\n"), 0o644)
+	st := newRunState(nil)
+	st.brewfile, st.masApps, st.finished = bf, countMasApps(bf), true
+	if st.masApps != 2 {
+		t.Fatalf("countMasApps = %d", st.masApps)
+	}
+	lines := strings.Join(summaryLines(st, false), "\n")
+	store, brew := strings.Index(lines, "App Store"), strings.Index(lines, "brew bundle")
+	if store < 0 || brew < 0 || store > brew {
+		t.Fatalf("App Store step must precede brew bundle:\n%s", lines)
 	}
 }

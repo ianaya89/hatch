@@ -858,6 +858,9 @@ func (m model) viewSelect() string {
 	case m.opts.update:
 		summary += styleWarn.Render(" · update newer")
 	}
+	if m.opts.dryRun {
+		summary += styleWarn.Render(" · dry run")
+	}
 	b.WriteString("\n" + summary + "\n")
 	b.WriteString(m.footer(
 		"↑↓ move · space toggle · → look inside · ←→ fold · + add path · - exclude · / filter · a/n all/none · enter pull · q quit"))
@@ -1004,6 +1007,9 @@ func summaryLines(st *runState, styled bool) []string {
 	if st.aborted != nil {
 		lines = append(lines, "  "+bad("✗ "+st.aborted.Error()))
 	}
+	if st.dryRun {
+		return append(lines, dryRunLines(st, ok, warn, bad, dim)...)
+	}
 	lines = append(lines, "  "+ok("✓ ")+plural(st.written, "file")+" written")
 	if st.uptodate > 0 {
 		lines = append(lines, "  "+ok("✓ ")+fmt.Sprintf("%d already up to date (not transferred)", st.uptodate))
@@ -1028,6 +1034,9 @@ func summaryLines(st *runState, styled bool) []string {
 		}
 	}
 	var next, later []string
+	if st.masApps > 0 {
+		next = append(next, fmt.Sprintf("sign in to the App Store first — %d apps in the Brewfile come from it (mas)", st.masApps))
+	}
 	if st.brewfile != "" {
 		next = append(next, "brew bundle --file "+st.brewfile)
 	}
@@ -1055,4 +1064,22 @@ func summaryLines(st *runState, styled bool) []string {
 		}
 	}
 	return lines
+}
+
+func dryRunLines(st *runState, ok, warn, bad, dim func(...string) string) []string {
+	lines := []string{"  " + warn("dry run — nothing was written or cloned"), ""}
+	lines = append(lines, "  "+ok("→ ")+fmt.Sprintf("would write %s (%s)", plural(st.planned, "file"), humanBytes(st.plannedSize)))
+	if st.uptodate > 0 {
+		lines = append(lines, "  "+ok("✓ ")+fmt.Sprintf("%d already up to date", st.uptodate))
+	}
+	if st.skipped > 0 {
+		lines = append(lines, "  "+warn("• ")+fmt.Sprintf("%d differ locally and would be kept (--update / --overwrite to replace)", st.skipped))
+	}
+	if st.plannedRepo > 0 {
+		lines = append(lines, "  "+ok("→ ")+fmt.Sprintf("would clone %s", plural(st.plannedRepo, "repo")))
+	}
+	if st.failed > 0 {
+		lines = append(lines, "  "+bad("✗ ")+fmt.Sprintf("%d items could not be checked", st.failed))
+	}
+	return append(lines, "", "  "+dim("run the same pull without --dry-run to apply it (the selection is saved)"))
 }
